@@ -18,7 +18,7 @@
   "scripts": {
     "build": "tsc",
     "cli": "tsx cli.ts",
-    "test": "node --import tsx --test lib/__tests__/*.test.ts",
+    "test": "node --import tsx --test lib/__tests__/*.test.ts providers/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -29,6 +29,6 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Randy424/acm-policy-skills.git"
+    "url": "https://github.com/Randy424/acm-policy-analysis.git"
   }
 }
