@@ -1,7 +1,6 @@
 /* Copyright Contributors to the Open Cluster Management project */
 
 import type {
-  ClusterComplianceStatus,
   ComplianceHistoryEntry,
   DriftAssessment,
   DriftRisk,
