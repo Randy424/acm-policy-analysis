@@ -162,6 +162,20 @@ const analysis = await analyzeWithProvider(parsed, result, provider)
 - For CLI: `oc` authenticated to an ACM hub cluster (ACM 2.9+)
 - For Claude provider: Anthropic API key
 
+## Future Investigations
+
+### 1. Richer policy risk context from trusted sources
+
+Currently Claude reasons about policy risk using only the policy spec, cluster status, and structural hints from the rule engine. There is no external knowledge base backing its severity claims. A future iteration would feed Claude curated risk context from trusted sources — CVE databases, Kubernetes security advisories, CIS benchmarks, and ACM documentation — so that analysis outputs include citations (e.g. "this pattern violates CIS Benchmark 5.2.6") rather than relying solely on the model's training data. This would strengthen confidence in risk assessments and give operators verifiable references to justify policy changes.
+
+### 2. True provider-agnostic LLM modularity
+
+The provider interface (`providers/provider.ts`) is designed for swappability, but the prompt construction in `claude.ts` — system prompt, structured JSON schema, severity calibration — is tightly coupled to Claude's behavior and output characteristics. A truly agnostic system would extract prompt engineering into a shared layer that adapts to each provider's strengths (e.g. different structured output mechanisms, token limits, instruction-following tendencies), making it practical to run against OpenAI, Gemini, or self-hosted models without per-provider prompt tuning.
+
+### 3. Compliance violation prediction
+
+Today the tool analyzes policy *configuration* risk — what could go wrong based on the policy spec. It does not examine the live environment for signals that a currently-compliant policy is trending toward violation. A future capability would scan cluster state (resource drift, recent deployments, operator version changes, upcoming maintenance windows) and cross-reference against policy constraints to predict which clusters are likely to become non-compliant before it happens. This shifts the tool from "is this policy dangerous" to "is this policy about to fire."
+
 ## License
 
 [Apache 2.0](LICENSE)
