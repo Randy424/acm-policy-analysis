@@ -65,28 +65,7 @@ async function main() {
 
   const fullResult = await analyzeWithProvider(parsed, result, analysisProvider)
 
-  const output = {
-    policy: { name: parsed.name, namespace: parsed.namespace, disabled: parsed.disabled },
-    provider: fullResult.provider,
-    riskScores: result.riskScores,
-    antiPatterns: result.antiPatterns,
-    saturation: result.saturation,
-    drift: result.drift,
-    fleetRisk: result.fleetRisk ? {
-      fleetScore: result.fleetRisk.fleetScore,
-      fleetLevel: result.fleetRisk.fleetLevel,
-      worstCluster: result.fleetRisk.worstCluster,
-      mostViolatedPolicy: result.fleetRisk.mostViolatedPolicy,
-      severityBuckets: result.fleetRisk.severityBuckets,
-      riskDistribution: result.fleetRisk.riskDistribution,
-    } : undefined,
-    summary: fullResult.summary,
-    riskExplanation: fullResult.riskExplanation,
-    catastrophicPrediction: fullResult.catastrophicPrediction,
-    accidentalScenarios: fullResult.accidentalScenarios,
-  }
-
-  console.log(JSON.stringify(output, null, 2))
+  console.log(JSON.stringify(fullResult, null, 2))
 }
 
 main()

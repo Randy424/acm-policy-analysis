@@ -1,16 +1,9 @@
 /* Copyright Contributors to the Open Cluster Management project */
 
-import type { AccidentalScenario, CatastrophicPrediction } from '../lib/types'
+import type { StructuredAnalysis } from '../lib/types'
 import type { PolicyAnalysisContext, PolicyAnalysisProvider } from './provider'
 
-const SYSTEM_PROMPT = `You are an ACM (Red Hat Advanced Cluster Management) policy governance expert. You analyze Kubernetes policies deployed across managed cluster fleets and provide risk assessments.
-
-You receive deterministic analysis results (risk scores, anti-pattern findings) alongside the raw policy data. Your role is to add contextual reasoning:
-- Explain WHY findings are dangerous in the user's specific fleet context
-- Predict cascading failures across interconnected systems
-- Generate plain-English summaries accessible to non-experts
-
-Be specific and actionable. Reference concrete resource names and cluster names from the data.`
+const SYSTEM_PROMPT = `You are an ACM (Red Hat Advanced Cluster Management) policy governance expert. You analyze Kubernetes policy specifications and return structured risk assessments as JSON. Respond with valid JSON only.`
 
 interface OllamaGenerateResponse {
   response: string
@@ -62,91 +55,59 @@ export class OllamaProvider implements PolicyAnalysisProvider {
     return data.response
   }
 
-  private formatContext(ctx: PolicyAnalysisContext): string {
-    const { policy, deterministicResult, fleetContext } = ctx
-    return JSON.stringify(
+  async analyze(ctx: PolicyAnalysisContext): Promise<{
+    impactedClusters: string[]
+    analysis: StructuredAnalysis
+  }> {
+    const { policy, deterministicResult } = ctx
+    const context = JSON.stringify(
       {
         policy: {
           name: policy.name,
           namespace: policy.namespace,
           remediationAction: policy.remediationAction,
-          disabled: policy.disabled,
           templates: policy.templates.map((t) => ({
             name: t.name,
             severity: t.severity,
             objectTemplates: t.objectTemplates.slice(0, 5),
           })),
           clusterCount: policy.clusterStatus.length,
-          nonCompliantClusters: policy.clusterStatus
-            .filter((s) => s.compliant === 'NonCompliant')
-            .map((s) => s.clusterName),
         },
         findings: deterministicResult.antiPatterns.slice(0, 8).map((f) => ({
           id: f.id,
           riskLevel: f.riskLevel,
           title: f.title,
         })),
-        fleet: fleetContext
-          ? { totalClusters: fleetContext.clusterNames.length, totalPolicies: fleetContext.allPolicies.length }
-          : undefined,
       },
       null,
       2
     )
-  }
 
-  async summarize(ctx: PolicyAnalysisContext): Promise<string> {
-    const context = this.formatContext(ctx)
-    return this.generate(
-      `Summarize this ACM policy in 2-3 sentences of plain English. Describe what it does, which clusters it affects, and its risk level.\n\n${context}`
-    )
-  }
-
-  async explainRisk(ctx: PolicyAnalysisContext): Promise<string> {
-    const context = this.formatContext(ctx)
-    return this.generate(
-      `Explain why the detected findings are dangerous for this fleet. Focus on cascading effects and operational impact. Be concise.\n\n${context}`
-    )
-  }
-
-  async predictCatastrophicPlacement(ctx: PolicyAnalysisContext): Promise<CatastrophicPrediction> {
-    const context = this.formatContext(ctx)
     const result = await this.generate(
-      `Analyze this policy for catastrophic placement risks. What happens if deployed to all clusters simultaneously? Could it break the policy controller or cluster networking? Respond in JSON: { "blastRadius": { "affectedClusters": [], "affectedResources": [], "severity": "LOW|MEDIUM|HIGH|CATASTROPHIC" }, "cascadingFailures": [{ "trigger": "...", "chain": ["..."], "finalImpact": "..." }], "confidence": 0.0-1.0, "reasoning": "..." }\n\n${context}`
+      `Analyze this ACM policy. Return JSON: { "impactedClusters": [...], "analysis": { "summary": "max 75 words", "risks": [{ "severity": "CRITICAL|HIGH|MEDIUM|LOW", "title": "max 10 words", "description": "max 50 words", "recommendation": "max 40 words" }], "recommendations": ["max 30 words each"], "catastrophicAssessment": { "severity": "LOW|MEDIUM|HIGH|CATASTROPHIC", "reasoning": "max 100 words", "cascadingFailures": [] }, "accidentalScenarios": [] } }\n\n${context}`
     )
 
     try {
       const jsonMatch = result.match(/\{[\s\S]*\}/)
-      if (jsonMatch) return JSON.parse(jsonMatch[0]) as CatastrophicPrediction
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]) as {
+          impactedClusters: string[]
+          analysis: StructuredAnalysis
+        }
+      }
     } catch {
       // Fall through
     }
 
     return {
-      blastRadius: {
-        affectedClusters: ctx.policy.clusterStatus.map((s) => s.clusterName),
-        affectedResources: [],
-        severity: 'MEDIUM',
+      impactedClusters: policy.clusterStatus.map((s) => s.clusterName),
+      analysis: {
+        summary: 'Ollama analysis could not be parsed.',
+        risks: [],
+        recommendations: [],
+        catastrophicAssessment: { severity: 'LOW', reasoning: result.slice(0, 200), cascadingFailures: [] },
+        accidentalScenarios: [],
       },
-      cascadingFailures: [],
-      confidence: 0.2,
-      reasoning: result,
     }
-  }
-
-  async detectAccidentalScenarios(ctx: PolicyAnalysisContext): Promise<AccidentalScenario[]> {
-    const context = this.formatContext(ctx)
-    const result = await this.generate(
-      `Look for subtle accidental scenarios beyond what deterministic rules catch. Consider policy interactions, timing issues, and label selector drift. Respond as a JSON array: [{ "id": "LLM-001", "title": "...", "description": "...", "triggerCondition": "...", "likelihood": "LOW|MEDIUM|HIGH", "impact": "LOW|MEDIUM|HIGH|CRITICAL", "recommendation": "..." }]. Return [] if none found.\n\n${context}`
-    )
-
-    try {
-      const jsonMatch = result.match(/\[[\s\S]*\]/)
-      if (jsonMatch) return JSON.parse(jsonMatch[0]) as AccidentalScenario[]
-    } catch {
-      // Fall through
-    }
-
-    return []
   }
 }

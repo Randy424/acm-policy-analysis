@@ -15,5 +15,5 @@
     "resolveJsonModule": true
   },
   "include": ["lib/**/*.ts", "providers/**/*.ts", "cli.ts"],
-  "exclude": ["node_modules", "dist", "lib/__tests__"]
+  "exclude": ["node_modules", "dist", "lib/__tests__", "providers/__tests__"]
 }

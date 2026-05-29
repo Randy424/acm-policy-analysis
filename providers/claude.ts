@@ -1,17 +1,32 @@
 /* Copyright Contributors to the Open Cluster Management project */
 
-import type { AccidentalScenario, CatastrophicPrediction } from '../lib/types'
+import type { StructuredAnalysis } from '../lib/types'
 import type { PolicyAnalysisContext, PolicyAnalysisProvider } from './provider'
 
-const SYSTEM_PROMPT = `You are an ACM (Red Hat Advanced Cluster Management) policy governance expert. You analyze Kubernetes policies deployed across managed cluster fleets and provide risk assessments.
+const SYSTEM_PROMPT = `You are an ACM (Red Hat Advanced Cluster Management) policy governance expert. You analyze Kubernetes policy specifications and return structured risk assessments as JSON.
 
-You receive deterministic analysis results (risk scores, anti-pattern findings) alongside the raw policy data. Your role is to add contextual reasoning that the deterministic rules cannot provide:
-- Explain WHY findings are dangerous in the user's specific fleet context
-- Predict cascading failures across interconnected systems
-- Detect subtle interaction risks between multiple policies
-- Generate plain-English summaries accessible to non-experts
+You receive a policy specification — templates, object definitions, remediation actions, namespace selectors, prune behavior — along with fleet context when available. You perform thorough, independent risk analysis directly from the specification.
 
-Be specific and actionable. Reference concrete resource names, namespaces, and cluster names from the data. Do not repeat the deterministic findings verbatim — add insight the rules cannot.`
+When cluster compliance data is present, incorporate it. When absent (pre-deployment), reason about what WOULD happen when deployed.
+
+SEVERITY CALIBRATION — use these definitions strictly:
+
+CRITICAL: Fleet-wide service disruption is certain or near-certain. Irreversible data loss across namespaces. Security boundary breach (RBAC deletion, namespace removal, secret exposure). Enforcement of mustnothave/DeleteAll on core workload resources (Deployments, StatefulSets, Services, PersistentVolumeClaims) in production or system namespaces.
+
+HIGH: Production workload impact on multiple clusters. Irreversible enforcement on important but non-core resources. Wide blast radius due to missing namespace scoping or overly broad selectors. Conflicts with critical cluster operators (OLM, cert-manager, ArgoCD).
+
+MEDIUM: Scoping gaps that could lead to unintended enforcement. Enforce mode on non-critical resources (ConfigMaps, labels, annotations) with some deletion risk. Missing guardrails that a mature policy should have.
+
+LOW: Informational observations. Best practice suggestions. Expected behaviors that are worth noting (e.g. disabled policies, inform-only mode, narrow scope). Things the operator probably already knows.
+
+KEY RULES:
+- Distinguish "WILL cause damage" from "COULD cause damage under specific conditions." Bias toward the lower severity when the triggering conditions are unlikely or require deliberate human action.
+- A disabled policy is not a risk — it is a policy that is not yet active. Do not flag "latent risk" from disabled state.
+- DeleteIfCreated on low-criticality resources (ConfigMaps, labels) in non-system namespaces is expected behavior, not a critical risk.
+- The catastrophic assessment section should only reach MEDIUM or above when enforcement targets core workload resources, system namespaces, or RBAC objects at fleet scale. A single ConfigMap in the default namespace is not catastrophic.
+- Reserve the catastrophic cascading-failures array for scenarios where a realistic chain of events leads to fleet-wide outage. Do not fabricate speculative dependency chains.
+
+You MUST respond with valid JSON only — no markdown, no explanation outside the JSON. Follow the exact schema and word limits specified in each request.`
 
 interface ClaudeMessage {
   role: 'user' | 'assistant'
@@ -40,7 +55,7 @@ export class ClaudeProvider implements PolicyAnalysisProvider {
     this.apiKey = config?.apiKey ?? process.env.CLAUDE_API_KEY ?? ''
     this.model = config?.model ?? process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-20250514'
     this.baseUrl = config?.baseUrl ?? 'https://api.anthropic.com'
-    this.maxTokens = config?.maxTokens ?? 1024
+    this.maxTokens = config?.maxTokens ?? 4096
   }
 
   async isAvailable(): Promise<boolean> {
@@ -74,87 +89,134 @@ export class ClaudeProvider implements PolicyAnalysisProvider {
 
   private formatContext(ctx: PolicyAnalysisContext): string {
     const { policy, deterministicResult, fleetContext } = ctx
+    const isPreDeployment = policy.clusterStatus.length === 0
+
     return JSON.stringify(
       {
+        analysisMode: isPreDeployment ? 'pre-deployment' : 'deployed',
         policy: {
           name: policy.name,
           namespace: policy.namespace,
-          remediationAction: policy.remediationAction,
           disabled: policy.disabled,
+          remediationAction: policy.remediationAction,
           templates: policy.templates.map((t) => ({
             name: t.name,
             kind: t.kind,
             severity: t.severity,
             remediationAction: t.remediationAction,
             pruneObjectBehavior: t.pruneObjectBehavior,
-            objectTemplates: t.objectTemplates,
+            namespaceSelector: t.namespaceSelector,
+            objectTemplates: t.objectTemplates.map((ot) => ({
+              complianceType: ot.complianceType,
+              kind: ot.kind,
+              apiVersion: ot.apiVersion,
+              name: ot.name,
+              namespace: ot.namespace,
+            })),
           })),
-          clusterStatus: policy.clusterStatus,
-        },
-        deterministicResult: {
-          riskScores: deterministicResult.riskScores,
-          antiPatternCount: deterministicResult.antiPatterns.length,
-          antiPatterns: deterministicResult.antiPatterns.slice(0, 10),
-          fleetRisk: deterministicResult.fleetRisk
-            ? {
-                fleetScore: deterministicResult.fleetRisk.fleetScore,
-                fleetLevel: deterministicResult.fleetRisk.fleetLevel,
-                worstCluster: deterministicResult.fleetRisk.worstCluster,
-              }
-            : undefined,
+          clusterStatus: isPreDeployment
+            ? '(pre-deployment — no clusters targeted yet)'
+            : policy.clusterStatus.map((s) => ({
+                cluster: s.clusterName,
+                compliant: s.compliant,
+              })),
         },
         fleetContext: fleetContext
           ? {
               totalClusters: fleetContext.clusterNames.length,
-              clusterNames: fleetContext.clusterNames.slice(0, 20),
+              clusterNames: fleetContext.clusterNames.slice(0, 30),
               totalPolicies: fleetContext.allPolicies.length,
+              otherPolicies: fleetContext.allPolicies
+                .filter((p) => p.name !== policy.name)
+                .slice(0, 15)
+                .map((p) => ({
+                  name: p.name,
+                  namespace: p.namespace,
+                  remediationAction: p.remediationAction,
+                  templates: p.templates.map((t) => ({
+                    kind: t.kind,
+                    objectKinds: t.objectTemplates.map((ot) => ot.kind),
+                    complianceTypes: t.objectTemplates.map((ot) => ot.complianceType),
+                  })),
+                })),
             }
           : undefined,
+        deterministicHints: {
+          antiPatternCount: deterministicResult.antiPatterns.length,
+          findings: deterministicResult.antiPatterns.slice(0, 10).map((f) => ({
+            id: f.id,
+            riskLevel: f.riskLevel,
+            title: f.title,
+          })),
+        },
       },
       null,
       2
     )
   }
 
-  async summarize(ctx: PolicyAnalysisContext): Promise<string> {
+  async analyze(ctx: PolicyAnalysisContext): Promise<{
+    impactedClusters: string[]
+    analysis: StructuredAnalysis
+  }> {
     const context = this.formatContext(ctx)
+    const isPreDeployment = ctx.policy.clusterStatus.length === 0
+
     const result = await this.chat([
       {
         role: 'user',
-        content: `Summarize this ACM policy in 2-4 sentences of plain English. Describe what the policy does, which clusters it affects, and its current risk posture. Write for someone who cannot read YAML.\n\n${context}`,
-      },
-    ])
-    return result
-  }
+        content: `Analyze this ACM policy and return a single JSON object. Follow the schema and word limits exactly.
 
-  async explainRisk(ctx: PolicyAnalysisContext): Promise<string> {
-    const context = this.formatContext(ctx)
-    const result = await this.chat([
-      {
-        role: 'user',
-        content: `The deterministic analysis found the anti-pattern findings shown below. Explain WHY these findings are dangerous in the context of this specific fleet. Focus on cascading effects, interaction risks, and operational impact. Do not repeat the finding descriptions verbatim — add contextual insight.\n\n${context}`,
-      },
-    ])
-    return result
-  }
+${isPreDeployment ? 'This is a PRE-DEPLOYMENT analysis — no clusters are targeted yet. For impactedClusters, reason about which clusters WOULD be affected based on the policy spec and fleet context. If you cannot determine specific clusters, return descriptive entries like "all clusters matching placement selector".' : 'This policy is deployed. Use the cluster compliance data to identify impacted clusters.'}
 
-  async predictCatastrophicPlacement(ctx: PolicyAnalysisContext): Promise<CatastrophicPrediction> {
-    const context = this.formatContext(ctx)
-    const result = await this.chat([
-      {
-        role: 'user',
-        content: `Analyze this policy for catastrophic placement risks. Consider:
-1. What happens if this policy is deployed to all targeted clusters simultaneously?
-2. Could enforcement cause cascading failures (e.g., breaking the policy controller itself, disrupting cluster networking, removing RBAC needed by operators)?
-3. What is the blast radius if the placement selector is broader than intended?
-
-Respond in valid JSON matching this structure:
+Return this exact JSON structure:
 {
-  "blastRadius": { "affectedClusters": [...], "affectedResources": [...], "severity": "LOW|MEDIUM|HIGH|CATASTROPHIC" },
-  "cascadingFailures": [{ "trigger": "...", "chain": ["step1", "step2"], "finalImpact": "..." }],
-  "confidence": 0.0-1.0,
-  "reasoning": "..."
+  "impactedClusters": ["cluster names or descriptions of affected clusters"],
+  "analysis": {
+    "summary": "2-3 sentence overview of what this policy does and its risk posture. MAX 75 WORDS.",
+    "risks": [
+      {
+        "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+        "title": "Short risk title. MAX 10 WORDS.",
+        "description": "What goes wrong and why. MAX 50 WORDS.",
+        "recommendation": "Specific action to fix this. MAX 40 WORDS."
+      }
+    ],
+    "recommendations": [
+      "Top 3-5 actionable steps to make this policy safer. MAX 30 WORDS EACH."
+    ],
+    "catastrophicAssessment": {
+      "severity": "LOW|MEDIUM|HIGH|CATASTROPHIC",
+      "reasoning": "Why this policy could or could not cause catastrophic damage. MAX 100 WORDS.",
+      "cascadingFailures": [
+        {
+          "trigger": "What initiates the failure",
+          "chain": ["Step 1", "Step 2"],
+          "finalImpact": "Ultimate consequence"
+        }
+      ]
+    },
+    "accidentalScenarios": [
+      {
+        "title": "Short scenario title. MAX 10 WORDS.",
+        "description": "What could go wrong accidentally. MAX 50 WORDS.",
+        "likelihood": "LOW|MEDIUM|HIGH",
+        "impact": "LOW|MEDIUM|HIGH|CRITICAL",
+        "recommendation": "How to prevent this. MAX 40 WORDS."
+      }
+    ]
+  }
 }
+
+Risk analysis priorities:
+- Enforce on dangerous resources, prune behavior, namespace scoping gaps, operator conflicts
+- Cascading failures from enforcement on wrong cluster/namespace/resource
+- Interactions with other fleet policies or cluster operators (OLM, ArgoCD, Helm, cert-manager)
+- Blast radius at scale
+
+If no risks/scenarios are found for a section, return empty arrays. If no catastrophic risk, return severity "LOW" with reasoning.
+
+RESPOND WITH VALID JSON ONLY.
 
 ${context}`,
       },
@@ -163,53 +225,29 @@ ${context}`,
     try {
       const jsonMatch = result.match(/\{[\s\S]*\}/)
       if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as CatastrophicPrediction
+        const parsed = JSON.parse(jsonMatch[0]) as {
+          impactedClusters: string[]
+          analysis: StructuredAnalysis
+        }
+        return parsed
       }
     } catch {
       // Fall through to default
     }
 
     return {
-      blastRadius: {
-        affectedClusters: ctx.policy.clusterStatus.map((s) => s.clusterName),
-        affectedResources: [],
-        severity: 'MEDIUM',
+      impactedClusters: ctx.policy.clusterStatus.map((s) => s.clusterName),
+      analysis: {
+        summary: 'Analysis completed but structured output could not be parsed.',
+        risks: [],
+        recommendations: [],
+        catastrophicAssessment: {
+          severity: 'LOW',
+          reasoning: result.slice(0, 200),
+          cascadingFailures: [],
+        },
+        accidentalScenarios: [],
       },
-      cascadingFailures: [],
-      confidence: 0.3,
-      reasoning: result,
     }
-  }
-
-  async detectAccidentalScenarios(ctx: PolicyAnalysisContext): Promise<AccidentalScenario[]> {
-    const context = this.formatContext(ctx)
-    const result = await this.chat([
-      {
-        role: 'user',
-        content: `Look for subtle accidental scenarios that deterministic rules might miss. Consider:
-1. Interactions between this policy and other policies in the fleet
-2. Timing-dependent failures (e.g., policy applied before a dependency exists)
-3. Label selector drift that could target unintended clusters over time
-4. Version skew between hub and managed cluster policy controllers
-
-Respond in valid JSON as an array:
-[{ "id": "LLM-001", "title": "...", "description": "...", "triggerCondition": "...", "likelihood": "LOW|MEDIUM|HIGH", "impact": "LOW|MEDIUM|HIGH|CRITICAL", "recommendation": "..." }]
-
-Return an empty array [] if no additional scenarios are detected beyond the deterministic findings.
-
-${context}`,
-      },
-    ])
-
-    try {
-      const jsonMatch = result.match(/\[[\s\S]*\]/)
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as AccidentalScenario[]
-      }
-    } catch {
-      // Fall through to empty
-    }
-
-    return []
   }
 }

@@ -212,12 +212,45 @@ export interface AccidentalScenario {
   recommendation: string
 }
 
+// --- Structured analysis (LLM-first output shape) ---
+
+export interface StructuredRisk {
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
+  title: string
+  description: string
+  recommendation: string
+}
+
+export interface StructuredCatastrophicAssessment {
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CATASTROPHIC'
+  reasoning: string
+  cascadingFailures: {
+    trigger: string
+    chain: string[]
+    finalImpact: string
+  }[]
+}
+
+export interface StructuredAccidentalScenario {
+  title: string
+  description: string
+  likelihood: 'LOW' | 'MEDIUM' | 'HIGH'
+  impact: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+  recommendation: string
+}
+
+export interface StructuredAnalysis {
+  summary: string
+  risks: StructuredRisk[]
+  recommendations: string[]
+  catastrophicAssessment: StructuredCatastrophicAssessment
+  accidentalScenarios: StructuredAccidentalScenario[]
+}
+
 export interface PolicyAnalysisResult {
-  deterministic: DeterministicResult
-  summary?: string
-  riskExplanation?: string
-  catastrophicPrediction?: CatastrophicPrediction
-  accidentalScenarios?: AccidentalScenario[]
+  policy: { name: string; namespace: string; disabled: boolean }
   provider: string
+  impactedClusters: string[]
+  analysis: StructuredAnalysis
   timestamp: string
 }
